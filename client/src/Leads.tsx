@@ -10,11 +10,11 @@ const fmtBRL = (v: number) => v ? v.toLocaleString('pt-BR', { style: 'currency',
 
 const EMPTY: Partial<Lead> = { name: '', phone: '', email: '', source: 'manual', stage: 'novo', value: 0, notes: '' };
 
-export default function Leads() {
+export default function Leads({ initialQ = '' }: { initialQ?: string }) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [stages, setStages] = useState<string[]>([]);
   const [view, setView] = useState<'kanban' | 'lista'>('kanban');
-  const [q, setQ] = useState('');
+  const [q, setQ] = useState(initialQ);
   const [edit, setEdit] = useState<Partial<Lead> | null>(null);
   const [dragOver, setDragOver] = useState('');
 
@@ -56,7 +56,7 @@ export default function Leads() {
           {stages.map((st) => {
             const cards = leads.filter((l) => l.stage === st);
             return (
-              <div key={st} className={'kcol' + (dragOver === st ? ' dragover' : '')}
+              <div key={st} className={'kcol ' + st + (dragOver === st ? ' dragover' : '')}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(st); }}
                 onDragLeave={() => setDragOver('')}
                 onDrop={(e) => {
@@ -64,7 +64,7 @@ export default function Leads() {
                   const id = Number(e.dataTransfer.getData('text/plain'));
                   if (id) moveStage(id, st);
                 }}>
-                <h4>{STAGE_LABEL[st] || st} <span>{cards.length}</span></h4>
+                <h4><span>{STAGE_LABEL[st] || st}</span> <span className="cnt">{cards.length}</span></h4>
                 {cards.map((l) => (
                   <div key={l.id} className="kcard" draggable
                     onDragStart={(e) => e.dataTransfer.setData('text/plain', String(l.id))}

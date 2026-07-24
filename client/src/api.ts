@@ -17,15 +17,16 @@ export interface Lead {
 export interface Chat {
   chatid: string; name: string; image: string; lastText: string;
   ts: number; unread: number; phone: string;
+  isGroup: boolean; pinned: boolean; leadId: number | null; leadStage: string | null;
 }
 export interface Msg {
   id: string; fromMe: boolean; text: string; kind: string; fileURL: string;
-  senderName: string; ts: number;
+  mimetype: string; senderName: string; quoted: string; ts: number;
 }
 export interface EmailRow {
   id: number; from_addr: string; from_name: string; to_addr: string;
-  subject: string; date: string; created_at: string; preview?: string;
-  text?: string; html?: string;
+  subject: string; date: string; created_at: string; direction?: string;
+  preview?: string; text?: string; html?: string;
 }
 
 export const fmtTs = (ts: number) => {
