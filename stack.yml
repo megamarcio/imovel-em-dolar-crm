@@ -1,0 +1,31 @@
+# docker stack deploy -c stack.yml imovel_crm  (na VPS 82, em /opt/imovel_crm)
+# Os segredos reais ficam em /opt/imovel_crm/stack.env.yml (chmod 600) — este arquivo é o modelo.
+version: "3.8"
+
+services:
+  crm:
+    image: imovel_crm:latest
+    networks: [traefik_public]
+    volumes:
+      - /opt/imovel_crm/data:/data
+    environment:
+      DB_PATH: /data/crm.db
+      UAZAPI_URL: https://r3group.uazapi.com
+      UAZAPI_TOKEN: "${UAZAPI_TOKEN}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
+      AUTH_SECRET: "${AUTH_SECRET}"
+      EMAIL_INBOUND_SECRET: "${EMAIL_INBOUND_SECRET}"
+      WA_HOOK_SECRET: "${WA_HOOK_SECRET}"
+    deploy:
+      replicas: 1
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: traefik_public
+        traefik.http.routers.iedcrm.rule: Host(`app.imovelemdolar.com.br`)
+        traefik.http.routers.iedcrm.entrypoints: websecure
+        traefik.http.routers.iedcrm.tls.certresolver: le
+        traefik.http.services.iedcrm.loadbalancer.server.port: "3000"
+
+networks:
+  traefik_public:
+    external: true
