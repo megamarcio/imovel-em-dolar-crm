@@ -9,6 +9,7 @@ type Tab = 'leads' | 'whats' | 'emails';
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [tab, setTab] = useState<Tab>('leads');
+  const [leadQ, setLeadQ] = useState('');
   const [pw, setPw] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [waOk, setWaOk] = useState<boolean | null>(null);
@@ -68,8 +69,8 @@ export default function App() {
         )}
         <button className="btn sm" onClick={async () => { await api('/api/logout', { method: 'POST' }); setAuthed(false); }}>Sair</button>
       </div>
-      {tab === 'leads' && <Leads />}
-      {tab === 'whats' && <Whats />}
+      {tab === 'leads' && <Leads initialQ={leadQ} />}
+      {tab === 'whats' && <Whats onOpenLead={(phone) => { setLeadQ(phone); setTab('leads'); }} />}
       {tab === 'emails' && <Emails />}
     </>
   );

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { simpleParser } from 'mailparser';
+import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -20,6 +21,14 @@ const UAZAPI_URL = (process.env.UAZAPI_URL || 'https://r3group.uazapi.com').repl
 const UAZAPI_TOKEN = process.env.UAZAPI_TOKEN || '';
 const EMAIL_INBOUND_SECRET = process.env.EMAIL_INBOUND_SECRET || '';
 const WA_HOOK_SECRET = process.env.WA_HOOK_SECRET || '';
+// SMTP do mailcow (mail.imovelemdolar.com.br) pra RESPONDER emails.
+// Senha: env SMTP_PASS ou arquivo /data/smtp.pass (criado na VPS).
+const SMTP_HOST = process.env.SMTP_HOST || 'mail.imovelemdolar.com.br';
+const SMTP_USER = process.env.SMTP_USER || 'contato@imovelemdolar.com.br';
+function smtpPass() {
+  if (process.env.SMTP_PASS) return process.env.SMTP_PASS;
+  try { return fs.readFileSync(path.join(path.dirname(DB_PATH), 'smtp.pass'), 'utf8').trim(); } catch { return ''; }
+}
 
 if (!ADMIN_PASSWORD || !AUTH_SECRET) {
   console.error('ADMIN_PASSWORD e AUTH_SECRET são obrigatórios');
@@ -55,12 +64,20 @@ CREATE TABLE IF NOT EXISTS emails(
   date TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS settings(
+  k TEXT PRIMARY KEY,
+  v TEXT DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
 CREATE INDEX IF NOT EXISTS idx_emails_created ON emails(created_at);
 `);
 
+try { db.exec(`ALTER TABLE emails ADD COLUMN direction TEXT DEFAULT 'in'`); } catch { /* já existe */ }
+
 const STAGES = ['novo', 'contato', 'qualificado', 'proposta', 'ganho', 'perdido'];
+const getSetting = (k, d = '') => (db.prepare('SELECT v FROM settings WHERE k=?').get(k)?.v ?? d);
+const setSetting = (k, v) => db.prepare('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k, v);
 const normPhone = (p) => String(p || '').replace(/\D/g, '');
 
 function findLeadByPhone(phone) {
@@ -148,7 +165,7 @@ app.post('/api/email/inbound', express.raw({ type: '*/*', limit: '25mb' }), asyn
   } catch (e) { console.error('[email/inbound]', e.message); }
 });
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '30mb' })); // mídia do WhatsApp sobe como data URI
 
 // webhook UAZAPI (público, protegido por segredo na URL)
 app.post('/api/wa/webhook/:secret', (req, res) => {
@@ -254,23 +271,81 @@ app.post('/api/wa/connect', async (_req, res) => {
 });
 app.get('/api/wa/chats', async (_req, res) => {
   try {
-    const r = await uaz('/chat/find', { limit: 100, sort: '-wa_lastMsgTimestamp' });
+    const r = await uaz('/chat/find', { limit: 150, sort: '-wa_lastMsgTimestamp' });
     const arr = Array.isArray(r) ? r : (r.chats || r.data || []);
     const chats = arr.map((c) => {
       const chatid = c.wa_chatid || c.id || '';
+      const phone = normPhone(chatid.split('@')[0]);
+      const lead = c.wa_isGroup ? null : findLeadByPhone(phone);
       return {
         chatid,
-        name: c.wa_contactName || c.name || c.lead_name || c.wa_name || chatid.split('@')[0],
+        name: (lead && lead.name && lead.name !== lead.phone ? lead.name : '') ||
+          c.wa_contactName || c.name || c.lead_name || c.wa_name || chatid.split('@')[0],
         image: c.imagePreview || c.image || '',
         isGroup: !!c.wa_isGroup,
         lastText: c.wa_lastMessageTextVote || '',
         ts: Number(c.wa_lastMsgTimestamp) || 0,
         unread: Number(c.wa_unreadCount) || 0,
+        pinned: !!c.wa_isPinned,
         phone: chatid.split('@')[0],
+        leadId: lead?.id || null,
+        leadStage: lead?.stage || null,
       };
-    }).filter((c) => !c.isGroup);
+    });
+    chats.sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.ts - a.ts));
     res.json({ chats });
   } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// marca lida / não lida
+app.post('/api/wa/read', async (req, res) => {
+  try {
+    const { chatid, read = true } = req.body || {};
+    await uaz('/chat/read', { number: chatid, read: !!read });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// exclui a conversa inteira
+app.post('/api/wa/chat/delete', async (req, res) => {
+  try {
+    const { chatid } = req.body || {};
+    await uaz('/chat/delete', { number: chatid, chatid, id: chatid });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// apaga uma mensagem pra todos
+app.post('/api/wa/msg/delete', async (req, res) => {
+  try {
+    await uaz('/message/delete', { id: String(req.body?.msgid || '').split(':').pop() });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// re-resolve URL de mídia expirada
+app.post('/api/wa/media-url', async (req, res) => {
+  try {
+    const r = await uaz('/message/download', { id: String(req.body?.msgid || '').split(':').pop() });
+    res.json({ fileURL: r.fileURL || '', mimetype: r.mimetype || r.mimeType || '' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// envia mídia (file = data URI base64 ou URL). type: image|video|audio|ptt|document
+app.post('/api/wa/send-media', async (req, res) => {
+  try {
+    const { chatid, type = 'image', file, caption = '', docName = '' } = req.body || {};
+    if (!chatid || !file) return res.status(400).json({ error: 'chatid e file obrigatórios' });
+    const body = { number: chatid, type, file, text: caption };
+    if (type === 'document' && docName) body.docName = docName;
+    const r = await uaz('/send/media', body);
+    res.json({ ok: true, id: r.messageid || r.id || '' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// respostas rápidas (persistidas)
+app.get('/api/wa/quick', (_req, res) => {
+  try { res.json({ quick: JSON.parse(getSetting('wa_quick', '[]')) }); }
+  catch { res.json({ quick: [] }); }
+});
+app.put('/api/wa/quick', (req, res) => {
+  const list = Array.isArray(req.body?.quick) ? req.body.quick.slice(0, 60) : [];
+  setSetting('wa_quick', JSON.stringify(list));
+  res.json({ quick: list });
 });
 app.get('/api/wa/messages', async (req, res) => {
   try {
@@ -284,17 +359,21 @@ app.get('/api/wa/messages', async (req, res) => {
       text: m.text || m.content?.text || m.caption || '',
       kind: mediaKind(m.messageType || m.type),
       fileURL: m.fileURL || '',
+      mimetype: m.mimetype || m.content?.mimetype || '',
       senderName: m.senderName || '',
+      quoted: m.quotedMsgText || m.quoted?.text || '',
       ts: Number(m.messageTimestamp) || 0,
-    })).sort((a, b) => a.ts - b.ts);
+    })).filter((m) => m.text || m.fileURL || m.kind !== 'text').sort((a, b) => a.ts - b.ts);
     res.json({ messages });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 app.post('/api/wa/send', async (req, res) => {
   try {
-    const { chatid, text } = req.body || {};
+    const { chatid, text, replyid } = req.body || {};
     if (!chatid || !text) return res.status(400).json({ error: 'chatid e text obrigatórios' });
-    const r = await uaz('/send/text', { number: chatid, text: String(text) });
+    const body = { number: chatid, text: String(text) };
+    if (replyid) body.replyid = String(replyid).split(':').pop(); // responder citando
+    const r = await uaz('/send/text', body);
     // garante lead pro contato
     const phone = normPhone(String(chatid).split('@')[0]);
     if (phone && !findLeadByPhone(phone)) createLead({ name: phone, phone, source: 'whatsapp' });
@@ -304,7 +383,7 @@ app.post('/api/wa/send', async (req, res) => {
 
 // ── Emails ──────────────────────────────────
 app.get('/api/emails', (_req, res) => {
-  const rows = db.prepare(`SELECT id,from_addr,from_name,to_addr,subject,date,created_at,
+  const rows = db.prepare(`SELECT id,from_addr,from_name,to_addr,subject,date,created_at,direction,
     substr(text,1,140) AS preview FROM emails ORDER BY id DESC LIMIT 300`).all();
   res.json({ emails: rows });
 });
@@ -316,6 +395,33 @@ app.get('/api/emails/:id', (req, res) => {
 app.delete('/api/emails/:id', (req, res) => {
   db.prepare('DELETE FROM emails WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
+});
+// responde um email via SMTP do mailcow (mail.imovelemdolar.com.br)
+app.post('/api/emails/:id/reply', async (req, res) => {
+  const orig = db.prepare('SELECT * FROM emails WHERE id=?').get(Number(req.params.id));
+  if (!orig) return res.status(404).json({ error: 'email não encontrado' });
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'texto vazio' });
+  const pass = smtpPass();
+  if (!pass) return res.status(503).json({ error: 'SMTP não configurado: falta a senha da caixa ' + SMTP_USER + ' (arquivo smtp.pass na pasta de dados)' });
+  try {
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST, port: 587, secure: false,
+      auth: { user: SMTP_USER, pass },
+    });
+    const subject = /^re:/i.test(orig.subject) ? orig.subject : 'Re: ' + orig.subject;
+    await transporter.sendMail({
+      from: `Imóvel em Dólar <${SMTP_USER}>`,
+      to: orig.from_addr,
+      subject,
+      text,
+      inReplyTo: orig.message_id || undefined,
+      references: orig.message_id || undefined,
+    });
+    db.prepare(`INSERT INTO emails(message_id,from_addr,from_name,to_addr,subject,text,html,date,direction)
+      VALUES('',?,?,?,?,?,'',?, 'out')`).run(SMTP_USER, 'Imóvel em Dólar', orig.from_addr, subject, text, new Date().toISOString());
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: 'falha no envio: ' + e.message }); }
 });
 
 // ── SPA estática ────────────────────────────
