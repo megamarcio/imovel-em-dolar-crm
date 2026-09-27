@@ -1,6 +1,6 @@
 // Cloudflare Email Worker — imovelemdolar-email (catch-all de imovelemdolar.com.br)
 // 1) encaminha pra marciogomesvip@gmail.com  2) entrega pro CRM  3) entrega na Caixa Única
-// Fonte publicada pela Caixa Única: C:Devixa-unicaworkerimovelemdolar-email.js (python scripts/cf_email.py imovel-worker)
+// Fonte publicada pela Caixa Única: caixa-unica/worker/imovelemdolar-email.js (python scripts/cf_email.py imovel-worker)
 export default {
   async email(message, env, ctx) {
     try {
